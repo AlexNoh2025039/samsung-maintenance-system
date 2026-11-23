@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  SUPERVISOR
+  TECHNICIAN
+}
+
+enum DeviceStateEnum {
+  OFF
+  UNKNOWN_INTERFACE
+  RECOVERY
+  DOWNLOAD_MODE
+  ANDROID_INIT
+  INCOMPATIBLE
+  UNKNOWN
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String
+  name      String
+  role      Role     @default(TECHNICIAN)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  audits    AuditLog[]
+  operations OperationHistory[]
+}
+
+model Station {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  machineName  String
+  ipAddress    String?
+  isRegistered Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  devices      Device[]
+  operations   OperationHistory[]
+}
+
+model Device {
+  id             String          @id @default(uuid())
+  serialNumber   String          @unique
+  model          String
+  state          DeviceStateEnum
+  androidVersion String?
+  stationId      String?
+  station        Station?        @relation(fields: [stationId], references: [id])
+  updatedAt      DateTime        @updatedAt
+  operations     OperationHistory[]
+}
+
+model OperationHistory {
+  id           String          @id @default(uuid())
+  type         String          // Ej: FACTORY_RESET, DIAGNOSTIC
+  status       String          // SUCCESS, FAILED, PENDING
+  details      String?
+  userId       String
+  user         User            @relation(fields: [userId], references: [id])
+  stationId    String
+  station      Station         @relation(fields: [stationId], references: [id])
+  deviceId     String
+  device       Device          @relation(fields: [deviceId], references: [id])
+  createdAt    DateTime        @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  action    String
+  target    String
+  details   String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+}
