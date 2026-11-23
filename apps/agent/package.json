@@ -2,12 +2,17 @@
   "name": "@samsung-maintenance/agent",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=20.12.0"
+  },
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsx watch src/index.ts"
+    "build": "pnpm --filter @samsung-maintenance/shared build && tsc",
+    "dev": "pnpm --filter @samsung-maintenance/shared build && tsx watch src/index.ts",
+    "test": "pnpm --filter @samsung-maintenance/shared build && tsx --test src/adb.test.ts src/device-monitor.test.ts"
   },
   "dependencies": {
+    "@samsung-maintenance/shared": "workspace:*",
     "socket.io-client": "^4.7.4"
   },
   "devDependencies": {

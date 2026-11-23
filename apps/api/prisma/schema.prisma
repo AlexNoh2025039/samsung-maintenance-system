@@ -50,9 +50,10 @@ model Station {
 model Device {
   id             String          @id @default(uuid())
   serialNumber   String          @unique
-  model          String
+  model          String?
   state          DeviceStateEnum
   androidVersion String?
+  batteryLevel   Int?
   stationId      String?
   station        Station?        @relation(fields: [stationId], references: [id])
   updatedAt      DateTime        @updatedAt
