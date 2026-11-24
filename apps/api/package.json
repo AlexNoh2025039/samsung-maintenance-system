@@ -9,7 +9,8 @@
   "scripts": {
     "build": "pnpm --filter @samsung-maintenance/shared build && tsc",
     "dev": "pnpm --filter @samsung-maintenance/shared build && tsx watch src/server.ts",
-    "test": "pnpm --filter @samsung-maintenance/shared build && tsx --test src/device-sync.test.ts src/station-auth.test.ts src/socket-handlers.test.ts"
+    "test": "pnpm --filter @samsung-maintenance/shared build && tsx --test src/auth.test.ts src/device-sync.test.ts src/station-auth.test.ts src/socket-handlers.test.ts",
+    "create-admin": "pnpm --filter @samsung-maintenance/shared build && tsx src/create-admin.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.9.0",

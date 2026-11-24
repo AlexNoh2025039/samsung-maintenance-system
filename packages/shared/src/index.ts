@@ -10,6 +10,12 @@ export enum DeviceState {
   UNKNOWN = 'UNKNOWN'
 }
 
+export enum UserRole {
+  ADMIN = 'ADMIN',
+  SUPERVISOR = 'SUPERVISOR',
+  TECHNICIAN = 'TECHNICIAN',
+}
+
 const ModelSchema = z
   .string()
   .trim()
@@ -70,6 +76,40 @@ export const DeviceStatusUpdateSchema = z
 
 export type DeviceObservation = z.infer<typeof DeviceObservationSchema>;
 export type DeviceStatusUpdate = z.infer<typeof DeviceStatusUpdateSchema>;
+
+export const LoginSchema = z.object({
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+  password: z.string().min(1).max(128),
+});
+
+export const CreateUserSchema = z.object({
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+  name: z.string().trim().min(1).max(120),
+  password: z.string().min(12).max(128),
+  role: z.nativeEnum(UserRole).default(UserRole.TECHNICIAN),
+});
+
+export const UpdateUserSchema = z
+  .object({
+    email: z
+      .string()
+      .trim()
+      .email()
+      .max(254)
+      .transform((email) => email.toLowerCase())
+      .optional(),
+    name: z.string().trim().min(1).max(120).optional(),
+    password: z.string().min(12).max(128).optional(),
+    role: z.nativeEnum(UserRole).optional(),
+    isActive: z.boolean().optional(),
+  })
+  .refine((data) => Object.keys(data).length > 0, {
+    message: 'At least one field must be provided.',
+  });
+
+export type LoginInput = z.infer<typeof LoginSchema>;
+export type CreateUserInput = z.infer<typeof CreateUserSchema>;
+export type UpdateUserInput = z.infer<typeof UpdateUserSchema>;
 
 export function mapAdbStatus(status: string): AgentDeviceState {
   switch (status) {
