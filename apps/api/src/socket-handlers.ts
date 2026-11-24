@@ -27,6 +27,7 @@ export function registerSocketHandlers(
   io.on('connection', (socket) => {
     console.log(`Estación o cliente conectado: ${socket.id}`);
     let registeredStationName: string | undefined;
+    let registeredStationId: string | undefined;
 
     socket.on('register-station', async (payload: unknown, ack?: EventAck) => {
       const registration = RegisterStationSchema.safeParse(payload);
@@ -52,6 +53,16 @@ export function registerSocketHandlers(
             isRegistered: true,
           },
         });
+        const station = await prisma.station.findUnique({
+          where: { name: stationName },
+        });
+        if (!station) {
+          ack?.({ ok: false, error: 'No se pudo resolver la estación registrada.' });
+          return;
+        }
+        if (registeredStationId) await socket.leave(`station:${registeredStationId}`);
+        registeredStationId = station.id;
+        await socket.join(`station:${station.id}`);
         registeredStationName = stationName;
         ack?.({ ok: true });
       } catch (error) {
@@ -99,6 +110,7 @@ export function registerSocketHandlers(
 
     socket.on('disconnect', () => {
       registeredStationName = undefined;
+      registeredStationId = undefined;
       console.log(`Cliente desconectado: ${socket.id}`);
     });
   });

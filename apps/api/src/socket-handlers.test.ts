@@ -147,6 +147,35 @@ test('Socket.IO authenticates stations, validates updates, and recovers after re
       })).ok,
       true,
     );
+    stationA.on('device-diagnostic-request', (_request, ack) => {
+      ack({
+        ok: true,
+        diagnostic: {
+          serialNumber: 'ABC123',
+          collectedAt: '2026-11-24T18:00:00.000Z',
+        },
+      });
+    });
+    const diagnosticAcks = await ioServer
+      .to('station:id:STATION_A')
+      .timeout(1_000)
+      .emitWithAck('device-diagnostic-request', {
+        requestId: '00000000-0000-4000-8000-000000000001',
+        serialNumber: 'ABC123',
+      });
+    assert.equal(diagnosticAcks[0]?.ok, true);
+    stationA.on('maintenance-operation-request', (_request, ack) => {
+      ack({ ok: true });
+    });
+    const operationAcks = await ioServer
+      .to('station:id:STATION_A')
+      .timeout(1_000)
+      .emitWithAck('maintenance-operation-request', {
+        requestId: '00000000-0000-4000-8000-000000000002',
+        serialNumber: 'ABC123',
+        operation: 'REBOOT',
+      });
+    assert.equal(operationAcks[0]?.ok, true);
 
     const device = {
       serialNumber: 'ABC123',
@@ -172,6 +201,8 @@ test('Socket.IO authenticates stations, validates updates, and recovers after re
     assert.deepEqual(prisma.upsertCalls, ['ABC123']);
     assert.deepEqual(prisma.records.get('ABC123'), {
       model: 'SM-S918B',
+      manufacturer: null,
+      buildNumber: null,
       androidVersion: '14',
       batteryLevel: 82,
       state: PrismaDeviceState.ANDROID_INIT,

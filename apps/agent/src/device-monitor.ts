@@ -1,4 +1,10 @@
-import { AgentDeviceState, mapAdbStatus } from '@samsung-maintenance/shared';
+import {
+  AgentDeviceState,
+  DeviceDiagnostic,
+  MaintenanceOperation,
+  DeviceState,
+  mapAdbStatus,
+} from '@samsung-maintenance/shared';
 import {
   AdbExecutor,
   AdbDevice,
@@ -6,6 +12,7 @@ import {
   executeAdb,
   parseAdbDevices,
   readBatteryLevel,
+  readDeviceDiagnostics,
   readDeviceProperties,
 } from './adb';
 
@@ -19,6 +26,8 @@ export interface DeviceObservation {
   model?: string;
   androidVersion?: string;
   batteryLevel?: number;
+  manufacturer?: string;
+  buildNumber?: string;
 }
 
 interface CachedDevice extends HardwareInfo {
@@ -35,6 +44,8 @@ export interface MonitorLogger {
 export class DeviceMonitor {
   private readonly cache = new Map<string, CachedDevice>();
   private readonly inFlight = new Set<string>();
+  private readonly previouslySeen = new Set<string>();
+  private readonly operationsInFlight = new Set<string>();
 
   constructor(
     private readonly execute: AdbExecutor = executeAdb,
@@ -44,18 +55,19 @@ export class DeviceMonitor {
 
   async scan(): Promise<DeviceObservation[]> {
     const devices = parseAdbDevices(await this.execute(['devices']));
+    const presentSerials = new Set(devices.map((device) => device.serialNumber));
     const onlineSerials = new Set(
       devices.filter((device) => device.status === 'device').map((device) => device.serialNumber),
     );
 
     for (const serialNumber of this.cache.keys()) {
-      if (!onlineSerials.has(serialNumber)) this.cache.delete(serialNumber);
+      if (!presentSerials.has(serialNumber)) this.cache.delete(serialNumber);
     }
 
     for (const serialNumber of onlineSerials) this.refreshInBackground(serialNumber);
 
-    return devices.map((device) => {
-      const { model, androidVersion, batteryLevel } =
+    const observations = devices.map((device) => {
+      const { model, androidVersion, batteryLevel, manufacturer, buildNumber } =
         this.cache.get(device.serialNumber) ?? {};
       return {
         serialNumber: device.serialNumber,
@@ -63,8 +75,66 @@ export class DeviceMonitor {
         ...(model ? { model } : {}),
         ...(androidVersion ? { androidVersion } : {}),
         ...(batteryLevel !== undefined ? { batteryLevel } : {}),
+        ...(manufacturer ? { manufacturer } : {}),
+        ...(buildNumber ? { buildNumber } : {}),
       };
     });
+
+    for (const serialNumber of this.previouslySeen) {
+      if (!presentSerials.has(serialNumber)) {
+        observations.push({ serialNumber, state: DeviceState.UNKNOWN });
+      }
+    }
+
+    this.previouslySeen.clear();
+    for (const serialNumber of presentSerials) this.previouslySeen.add(serialNumber);
+    return observations;
+  }
+
+  async diagnose(serialNumber: string): Promise<DeviceDiagnostic> {
+    const devices = parseAdbDevices(await this.execute(['devices']));
+    const target = devices.find((device) => device.serialNumber === serialNumber);
+    if (!target || target.status !== 'device') {
+      throw new Error('El dispositivo no está conectado o no autorizó la depuración ADB.');
+    }
+    return readDeviceDiagnostics(serialNumber, this.execute);
+  }
+
+  async executeMaintenance(
+    serialNumber: string,
+    operation: MaintenanceOperation,
+  ): Promise<void> {
+    if (this.operationsInFlight.has(serialNumber)) {
+      throw new Error('Ya hay una operación en curso para este dispositivo.');
+    }
+    this.operationsInFlight.add(serialNumber);
+    try {
+      const devices = parseAdbDevices(await this.execute(['devices']));
+      const target = devices.find((device) => device.serialNumber === serialNumber);
+      if (!target || target.status !== 'device') {
+        throw new Error('El dispositivo no está conectado o no autorizó la depuración ADB.');
+      }
+
+      const manufacturer = await this.execute([
+        '-s',
+        serialNumber,
+        'shell',
+        'getprop',
+        'ro.product.manufacturer',
+      ]);
+      if (manufacturer.trim().toLowerCase() !== 'samsung') {
+        throw new Error('El fabricante Samsung no pudo verificarse mediante ADB.');
+      }
+
+      await this.execute([
+        '-s',
+        serialNumber,
+        'reboot',
+        ...(operation === 'REBOOT_RECOVERY' ? ['recovery'] : []),
+      ]);
+    } finally {
+      this.operationsInFlight.delete(serialNumber);
+    }
   }
 
   private refreshInBackground(serialNumber: string): void {

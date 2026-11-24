@@ -23,7 +23,9 @@ test('DeviceMonitor reads hardware only for authorized devices and maps sideload
         ].join('\n');
       }
       if (args[3] === 'getprop' && args[4] === 'ro.product.model') return 'SM-S918B\n';
-      if (args[3] === 'getprop') return '14\n';
+      if (args[3] === 'getprop' && args[4] === 'ro.build.version.release') return '14\n';
+      if (args[3] === 'getprop' && args[4] === 'ro.product.manufacturer') return 'samsung\n';
+      if (args[3] === 'getprop' && args[4] === 'ro.build.display.id') return 'TP1A.220624.014\n';
       if (args[3] === 'dumpsys') return 'level: 82\n';
       throw new Error('Unexpected command');
     },
@@ -51,10 +53,12 @@ test('DeviceMonitor reads hardware only for authorized devices and maps sideload
       model: 'SM-S918B',
       androidVersion: '14',
       batteryLevel: 82,
+      manufacturer: 'samsung',
+      buildNumber: 'TP1A.220624.014',
     },
   );
   assert.equal(firstScan[0].model, undefined);
-  assert.equal(commands.filter((args) => args[0] !== 'devices').length, 3);
+  assert.equal(commands.filter((args) => args[0] !== 'devices').length, 5);
   assert.equal(errors.length, 0);
 });
 
@@ -73,13 +77,13 @@ test('DeviceMonitor does not duplicate in-flight reads for the same serial', asy
 
   await monitor.scan();
   await monitor.scan();
-  assert.equal(commands.length, 2);
+  assert.equal(commands.length, 4);
 
   releaseReads();
   await flushBackgroundWork();
-  assert.equal(commands.length, 3);
+  assert.equal(commands.length, 5);
   await monitor.scan();
-  assert.equal(commands.length, 3);
+  assert.equal(commands.length, 5);
 });
 
 test('one device failure does not prevent hardware collection for another device', async () => {
@@ -107,10 +111,100 @@ test('one device failure does not prevent hardware collection for another device
   assert.ok(errors.length > 0);
 });
 
+test('disconnect is reported as UNKNOWN and a later reconnection is observed', async () => {
+  let connected = true;
+  const monitor = new DeviceMonitor(async (args) => {
+    if (args[0] === 'devices') {
+      return connected
+        ? 'List of devices attached\nPHONE device\n'
+        : 'List of devices attached\n';
+    }
+    if (args[4] === 'ro.product.model') return 'SM-S918B';
+    if (args[4] === 'ro.build.version.release') return '14';
+    if (args[4] === 'ro.product.manufacturer') return 'samsung';
+    if (args[4] === 'ro.build.display.id') return 'TP1A';
+    throw new Error('Unexpected command');
+  });
+
+  await monitor.scan();
+  await flushBackgroundWork();
+  connected = false;
+  const disconnected = await monitor.scan();
+  assert.deepEqual(disconnected, [{ serialNumber: 'PHONE', state: DeviceState.UNKNOWN }]);
+
+  connected = true;
+  const reconnected = await monitor.scan();
+  await flushBackgroundWork();
+  assert.deepEqual(reconnected[0], {
+    serialNumber: 'PHONE',
+    state: DeviceState.ANDROID_INIT,
+  });
+});
+
 test('ADB unavailable errors are surfaced to the caller for retry on the next scan', async () => {
   const monitor = new DeviceMonitor(async () => {
     throw new Error('adb not found');
   });
 
   await assert.rejects(monitor.scan(), /adb not found/);
+});
+
+test('diagnostic refuses devices that are disconnected or have not authorized ADB', async () => {
+  const commands: string[][] = [];
+  const monitor = new DeviceMonitor(async (args) => {
+    commands.push(args);
+    return 'List of devices attached\nPHONE unauthorized\n';
+  });
+
+  await assert.rejects(
+    monitor.diagnose('PHONE'),
+    /no está conectado o no autorizó/,
+  );
+  assert.deepEqual(commands, [['devices']]);
+});
+
+test('maintenance operations allow only explicit non-destructive reboot commands', async () => {
+  const commands: string[][] = [];
+  const monitor = new DeviceMonitor(async (args) => {
+    commands.push(args);
+    if (args[0] === 'devices') return 'List of devices attached\nPHONE device\n';
+    if (args.slice(3).join(' ') === 'getprop ro.product.manufacturer') return 'Samsung\n';
+    return '';
+  });
+
+  await monitor.executeMaintenance('PHONE', 'REBOOT');
+  await monitor.executeMaintenance('PHONE', 'REBOOT_RECOVERY');
+
+  assert.deepEqual(commands, [
+    ['devices'],
+    ['-s', 'PHONE', 'shell', 'getprop', 'ro.product.manufacturer'],
+    ['-s', 'PHONE', 'reboot'],
+    ['devices'],
+    ['-s', 'PHONE', 'shell', 'getprop', 'ro.product.manufacturer'],
+    ['-s', 'PHONE', 'reboot', 'recovery'],
+  ]);
+});
+
+test('maintenance operation refuses to reboot a non-Samsung device', async () => {
+  const commands: string[][] = [];
+  const monitor = new DeviceMonitor(async (args) => {
+    commands.push(args);
+    if (args[0] === 'devices') return 'List of devices attached\nPHONE device\n';
+    if (args.slice(3).join(' ') === 'getprop ro.product.manufacturer') return 'Google';
+    return '';
+  });
+
+  await assert.rejects(monitor.executeMaintenance('PHONE', 'REBOOT'), /fabricante Samsung/);
+  assert.equal(commands.some((args) => args[2] === 'reboot'), false);
+});
+
+test('maintenance operation rejects unapproved devices before sending a command', async () => {
+  const commands: string[][] = [];
+  const monitor = new DeviceMonitor(async (args) => {
+    commands.push(args);
+    return 'List of devices attached\nPHONE unauthorized\n';
+  });
+
+  await assert.rejects(monitor.executeMaintenance('PHONE', 'REBOOT'), /no está conectado o no autorizó/);
+  assert.deepEqual(commands, [['devices']]);
 });

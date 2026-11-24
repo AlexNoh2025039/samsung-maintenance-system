@@ -1,8 +1,12 @@
 import { io } from 'socket.io-client';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { DeviceStatusUpdate } from '@samsung-maintenance/shared';
+import {
+  DeviceStatusUpdate,
+} from '@samsung-maintenance/shared';
 import { DeviceMonitor } from './device-monitor';
+import { createDiagnosticRequestHandler } from './diagnostic-handler';
+import { createMaintenanceRequestHandler } from './maintenance-handler';
 
 const envFile = resolve(__dirname, '../.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
@@ -48,6 +52,15 @@ if (!stationToken) {
     registered = false;
     console.warn(`Desconectado del servidor Socket.IO: ${reason}`);
   });
+
+  socket.on(
+    'device-diagnostic-request',
+    createDiagnosticRequestHandler(monitor, () => registered),
+  );
+  socket.on(
+    'maintenance-operation-request',
+    createMaintenanceRequestHandler(monitor, () => registered),
+  );
 
   async function scanDevices(): Promise<void> {
     if (stopped) return;

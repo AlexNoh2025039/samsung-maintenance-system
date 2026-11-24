@@ -7,6 +7,8 @@ import {
 
 export interface DeviceSnapshot {
   model: string | null;
+  manufacturer: string | null;
+  buildNumber: string | null;
   androidVersion: string | null;
   batteryLevel: number | null;
   state: PrismaDeviceState;
@@ -19,6 +21,8 @@ export interface DeviceSyncStore {
       where: { serialNumber: string };
       select: {
         model: true;
+        manufacturer: true;
+        buildNumber: true;
         androidVersion: true;
         batteryLevel: true;
         state: true;
@@ -30,6 +34,8 @@ export interface DeviceSyncStore {
       create: {
         serialNumber: string;
         model: string | null;
+        manufacturer: string | null;
+        buildNumber: string | null;
         androidVersion: string | null;
         batteryLevel: number | null;
         state: PrismaDeviceState;
@@ -37,6 +43,8 @@ export interface DeviceSyncStore {
       };
       update: {
         model?: string | null;
+        manufacturer?: string | null;
+        buildNumber?: string | null;
         androidVersion?: string;
         batteryLevel?: number;
         state: PrismaDeviceState;
@@ -68,6 +76,10 @@ function isUnchanged(
     existing.stationId === stationId &&
     (existing.model !== 'Samsung Device' || observation.model !== undefined) &&
     (observation.model === undefined || existing.model === observation.model) &&
+    (observation.manufacturer === undefined ||
+      existing.manufacturer === observation.manufacturer) &&
+    (observation.buildNumber === undefined ||
+      existing.buildNumber === observation.buildNumber) &&
     (observation.androidVersion === undefined ||
       existing.androidVersion === observation.androidVersion) &&
     (observation.batteryLevel === undefined ||
@@ -85,6 +97,8 @@ export async function syncDeviceObservation(
     where: { serialNumber: observation.serialNumber },
     select: {
       model: true,
+      manufacturer: true,
+      buildNumber: true,
       androidVersion: true,
       batteryLevel: true,
       state: true,
@@ -99,6 +113,8 @@ export async function syncDeviceObservation(
     create: {
       serialNumber: observation.serialNumber,
       model: observation.model ?? null,
+      manufacturer: observation.manufacturer ?? null,
+      buildNumber: observation.buildNumber ?? null,
       androidVersion: observation.androidVersion ?? null,
       batteryLevel: observation.batteryLevel ?? null,
       state,
@@ -106,6 +122,12 @@ export async function syncDeviceObservation(
     },
     update: {
       ...(observation.model !== undefined ? { model: observation.model } : {}),
+      ...(observation.manufacturer !== undefined
+        ? { manufacturer: observation.manufacturer }
+        : {}),
+      ...(observation.buildNumber !== undefined
+        ? { buildNumber: observation.buildNumber }
+        : {}),
       ...(observation.model === undefined && existing?.model === 'Samsung Device'
         ? { model: null }
         : {}),

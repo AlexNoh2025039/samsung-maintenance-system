@@ -1,6 +1,7 @@
 import { Prisma, PrismaClient, Role as PrismaRole } from '@prisma/client';
 import {
   CreateUserInput,
+  UpdateStationInput,
   UpdateUserInput,
   UserRole,
 } from '@samsung-maintenance/shared';
@@ -17,6 +18,42 @@ export interface SessionRecord {
   user: AuthenticatedUser;
 }
 
+export interface AdminSession {
+  id: string;
+  createdAt: Date;
+  expiresAt: Date;
+  revokedAt: Date | null;
+  user: Pick<AuthenticatedUser, 'id' | 'email' | 'name' | 'role' | 'isActive'>;
+}
+
+export interface AuditEntry {
+  id: string;
+  action: string;
+  target: string;
+  details: string | null;
+  createdAt: Date;
+  user: Pick<AuthenticatedUser, 'id' | 'email' | 'name' | 'role'>;
+}
+
+export interface AdminStation {
+  id: string;
+  name: string;
+  machineName: string;
+  ipAddress: string | null;
+  isRegistered: boolean;
+  createdAt: Date;
+}
+
+export interface DashboardSummary {
+  stations: number;
+  devices: number;
+  users: number;
+  activeUsers: number;
+  activeSessions: number;
+  operations: number;
+  auditEntries: number;
+}
+
 export interface AuthStore {
   findUserByEmail(email: string): Promise<UserCredential | null>;
   findSessionByTokenHash(tokenHash: string): Promise<SessionRecord | null>;
@@ -26,12 +63,24 @@ export interface AuthStore {
 
 export interface UserStore extends AuthStore {
   listUsers(): Promise<AuthenticatedUser[]>;
-  createUser(input: Omit<CreateUserInput, 'password'> & { password: string }): Promise<AuthenticatedUser>;
+  createUser(
+    actorId: string,
+    input: Omit<CreateUserInput, 'password'> & { password: string },
+  ): Promise<AuthenticatedUser>;
   updateUser(
     targetId: string,
     actorId: string,
     input: UpdateUserInput & { password?: string },
   ): Promise<AuthenticatedUser | null>;
+  listSessions(): Promise<AdminSession[]>;
+  listAuditEntries(): Promise<AuditEntry[]>;
+  revokeSessionByAdmin(id: string, actorId: string): Promise<boolean>;
+  updateStation(
+    id: string,
+    actorId: string,
+    input: UpdateStationInput,
+  ): Promise<AdminStation | null>;
+  getDashboardSummary(): Promise<DashboardSummary>;
   createInitialAdmin(input: {
     email: string;
     name: string;
@@ -78,15 +127,42 @@ export class PrismaAuthStore implements UserStore {
   }
 
   async createSession(userId: string, tokenHash: string, expiresAt: Date): Promise<void> {
-    await this.prisma.authSession.create({
-      data: { userId, tokenHash, expiresAt },
+    await this.prisma.$transaction(async (transaction) => {
+      const session = await transaction.authSession.create({
+        data: { userId, tokenHash, expiresAt },
+        select: { id: true },
+      });
+      await transaction.auditLog.create({
+        data: {
+          action: 'AUTH_LOGIN',
+          target: session.id,
+          userId,
+        },
+      });
     });
   }
 
   async revokeSession(id: string, revokedAt: Date): Promise<void> {
-    await this.prisma.authSession.updateMany({
-      where: { id, revokedAt: null },
-      data: { revokedAt },
+    await this.prisma.$transaction(async (transaction) => {
+      const result = await transaction.authSession.updateMany({
+        where: { id, revokedAt: null },
+        data: { revokedAt },
+      });
+      if (result.count > 0) {
+        const session = await transaction.authSession.findUnique({
+          where: { id },
+          select: { userId: true },
+        });
+        if (session) {
+          await transaction.auditLog.create({
+            data: {
+              action: 'AUTH_LOGOUT',
+              target: id,
+              userId: session.userId,
+            },
+          });
+        }
+      }
     });
   }
 
@@ -105,11 +181,23 @@ export class PrismaAuthStore implements UserStore {
   }
 
   async createUser(
+    actorId: string,
     input: Omit<CreateUserInput, 'password'> & { password: string },
   ): Promise<AuthenticatedUser> {
-    return this.prisma.user.create({
-      data: { ...input, role: roleMap[input.role] },
-      select: publicUserSelect,
+    return this.prisma.$transaction(async (transaction) => {
+      const user = await transaction.user.create({
+        data: { ...input, role: roleMap[input.role] },
+        select: publicUserSelect,
+      });
+      await transaction.auditLog.create({
+        data: {
+          action: 'USER_CREATED',
+          target: user.id,
+          details: JSON.stringify({ role: user.role }),
+          userId: actorId,
+        },
+      });
+      return user;
     });
   }
 
@@ -156,6 +244,18 @@ export class PrismaAuthStore implements UserStore {
           select: publicUserSelect,
         });
 
+        await transaction.auditLog.create({
+          data: {
+            action: 'USER_UPDATED',
+            target: targetId,
+            details: JSON.stringify({
+              fields: Object.keys(input).filter((field) => field !== 'password'),
+              passwordChanged: input.password !== undefined,
+            }),
+            userId: actorId,
+          },
+        });
+
         if (input.password !== undefined || disablesUser) {
           await transaction.authSession.updateMany({
             where: { userId: targetId, revokedAt: null },
@@ -169,6 +269,152 @@ export class PrismaAuthStore implements UserStore {
     );
   }
 
+  async listSessions(): Promise<AdminSession[]> {
+    return this.prisma.authSession.findMany({
+      select: {
+        id: true,
+        createdAt: true,
+        expiresAt: true,
+        revokedAt: true,
+        user: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            role: true,
+            isActive: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+  }
+
+  async listAuditEntries(): Promise<AuditEntry[]> {
+    return this.prisma.auditLog.findMany({
+      select: {
+        id: true,
+        action: true,
+        target: true,
+        details: true,
+        createdAt: true,
+        user: {
+          select: { id: true, email: true, name: true, role: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+  }
+
+  async revokeSessionByAdmin(id: string, actorId: string): Promise<boolean> {
+    return this.prisma.$transaction(async (transaction) => {
+      const session = await transaction.authSession.findUnique({
+        where: { id },
+        select: { id: true, userId: true, revokedAt: true },
+      });
+      if (!session) return false;
+
+      const result = session.revokedAt
+        ? { count: 0 }
+        : await transaction.authSession.updateMany({
+            where: { id, revokedAt: null },
+            data: { revokedAt: new Date() },
+          });
+      if (result.count > 0) {
+        await transaction.auditLog.create({
+          data: {
+            action: 'ADMIN_REVOKED_SESSION',
+            target: id,
+            details: JSON.stringify({ sessionUserId: session.userId }),
+            userId: actorId,
+          },
+        });
+      }
+      return true;
+    });
+  }
+
+  async updateStation(
+    id: string,
+    actorId: string,
+    input: UpdateStationInput,
+  ): Promise<AdminStation | null> {
+    return this.prisma.$transaction(async (transaction) => {
+      const current = await transaction.station.findUnique({
+        where: { id },
+        select: { id: true },
+      });
+      if (!current) return null;
+
+      const station = await transaction.station.update({
+        where: { id },
+        data: {
+          ...(input.machineName !== undefined
+            ? { machineName: input.machineName }
+            : {}),
+          ...(input.ipAddress !== undefined ? { ipAddress: input.ipAddress } : {}),
+          ...(input.isRegistered !== undefined
+            ? { isRegistered: input.isRegistered }
+            : {}),
+        },
+        select: {
+          id: true,
+          name: true,
+          machineName: true,
+          ipAddress: true,
+          isRegistered: true,
+          createdAt: true,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          action: 'STATION_UPDATED',
+          target: station.id,
+          details: JSON.stringify({ fields: Object.keys(input) }),
+          userId: actorId,
+        },
+      });
+      return station;
+    });
+  }
+
+  async getDashboardSummary(): Promise<DashboardSummary> {
+    const [
+      stations,
+      devices,
+      users,
+      activeUsers,
+      activeSessions,
+      operations,
+      auditEntries,
+    ] = await this.prisma.$transaction([
+      this.prisma.station.count(),
+      this.prisma.device.count(),
+      this.prisma.user.count(),
+      this.prisma.user.count({ where: { isActive: true } }),
+      this.prisma.authSession.count({
+        where: {
+          revokedAt: null,
+          expiresAt: { gt: new Date() },
+        },
+      }),
+      this.prisma.operationHistory.count(),
+      this.prisma.auditLog.count(),
+    ]);
+
+    return {
+      stations,
+      devices,
+      users,
+      activeUsers,
+      activeSessions,
+      operations,
+      auditEntries,
+    };
+  }
+
   async createInitialAdmin(input: {
     email: string;
     name: string;
@@ -179,10 +425,18 @@ export class PrismaAuthStore implements UserStore {
         const userCount = await transaction.user.count();
         if (userCount !== 0) throw new UserStoreError('BOOTSTRAP_ALREADY_COMPLETED');
 
-        return transaction.user.create({
+        const user = await transaction.user.create({
           data: { ...input, role: PrismaRole.ADMIN, isActive: true },
           select: publicUserSelect,
         });
+        await transaction.auditLog.create({
+          data: {
+            action: 'INITIAL_ADMIN_CREATED',
+            target: user.id,
+            userId: user.id,
+          },
+        });
+        return user;
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );

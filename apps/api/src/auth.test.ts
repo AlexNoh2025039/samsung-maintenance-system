@@ -8,10 +8,20 @@ import { AddressInfo } from 'node:net';
 import { Role } from '@prisma/client';
 import { UserRole } from '@samsung-maintenance/shared';
 import { AuthenticatedUser } from './auth-types';
-import { AuthStore, SessionRecord, UserCredential, UserStore, UserStoreError } from './auth-store';
+import {
+  AdminSession,
+  AdminStation,
+  AuditEntry,
+  AuthStore,
+  SessionRecord,
+  UserCredential,
+  UserStore,
+  UserStoreError,
+} from './auth-store';
 import { createAuthRouter } from './auth-routes';
 import { createRequireAuth, requireRoles } from './auth-middleware';
 import { createUserRouter } from './user-routes';
+import { createAdminRouter } from './admin-routes';
 import { hashPassword } from './password';
 
 const PASSWORD = 'a-secure-password-123';
@@ -39,6 +49,7 @@ function createUser(
 function createStore(initialUsers: UserCredential[]): UserStore {
   const users = new Map(initialUsers.map((user) => [user.id, user]));
   const sessions = new Map<string, SessionRecord>();
+  const audits: AuditEntry[] = [];
 
   const store: UserStore = {
     async findUserByEmail(email) {
@@ -67,10 +78,89 @@ function createStore(initialUsers: UserCredential[]): UserStore {
         if (session.user.id === userId) session.revokedAt = revokedAt;
       }
     },
+    async listSessions(): Promise<AdminSession[]> {
+      return [...sessions.values()].map((session) => ({
+        id: session.id,
+        createdAt: new Date(),
+        expiresAt: session.expiresAt,
+        revokedAt: session.revokedAt,
+        user: {
+          id: session.user.id,
+          email: session.user.email,
+          name: session.user.name,
+          role: session.user.role,
+          isActive: session.user.isActive,
+        },
+      }));
+    },
+    async listAuditEntries() {
+      return audits;
+    },
+    async revokeSessionByAdmin(id, actorId) {
+      const session = [...sessions.values()].find((item) => item.id === id);
+      if (!session) return false;
+      if (!session.revokedAt) {
+        session.revokedAt = new Date();
+        audits.push({
+          id: `audit-${audits.length + 1}`,
+          action: 'ADMIN_REVOKED_SESSION',
+          target: id,
+          details: null,
+          createdAt: new Date(),
+          user: {
+            id: actorId,
+            email: users.get(actorId)!.email,
+            name: users.get(actorId)!.name,
+            role: users.get(actorId)!.role,
+          },
+        });
+      }
+      return true;
+    },
+    async updateStation(id, actorId, input): Promise<AdminStation | null> {
+      if (id !== 'station-1') return null;
+      const station = {
+        id,
+        name: 'station-1',
+        machineName: input.machineName ?? 'station-1',
+        ipAddress: input.ipAddress ?? null,
+        isRegistered: input.isRegistered ?? true,
+        createdAt: new Date(),
+      };
+      audits.push({
+        id: `audit-${audits.length + 1}`,
+        action: 'STATION_UPDATED',
+        target: id,
+        details: '{"fields":["machineName"]}',
+        createdAt: new Date(),
+        user: {
+          id: actorId,
+          email: users.get(actorId)!.email,
+          name: users.get(actorId)!.name,
+          role: users.get(actorId)!.role,
+        },
+      });
+      return station;
+    },
+    async getDashboardSummary() {
+      const activeSessions = [...sessions.values()].filter(
+        (session) => session.revokedAt === null && session.expiresAt.getTime() > Date.now(),
+      ).length;
+      const activeUsers = [...users.values()].filter((user) => user.isActive).length;
+      return {
+        stations: 1,
+        devices: 0,
+        users: users.size,
+        activeUsers,
+        activeSessions,
+        operations: 0,
+        auditEntries: audits.length,
+      };
+    },
     async listUsers() {
       return [...users.values()].map(toPublicUser);
     },
-    async createUser(input) {
+    async createUser(_actorId, input) {
       const user = createUser(
         `user-${users.size + 1}`,
         input.role === UserRole.ADMIN
@@ -118,7 +208,7 @@ function createStore(initialUsers: UserCredential[]): UserStore {
     },
     async createInitialAdmin(input) {
       if (users.size > 0) throw new UserStoreError('BOOTSTRAP_ALREADY_COMPLETED');
-      return store.createUser({
+      return store.createUser('bootstrap-admin', {
         ...input,
         role: UserRole.ADMIN,
       });
@@ -152,6 +242,7 @@ async function startApp(users: UserCredential[]) {
     requireRoles(Role.ADMIN),
     createUserRouter(store),
   );
+  app.use('/api/admin', requireAuth, requireRoles(Role.ADMIN), createAdminRouter(store));
   app.get('/admin-only', requireAuth, requireRoles(Role.ADMIN), (_request, response) =>
     response.json({ ok: true }),
   );
@@ -326,6 +417,10 @@ test('only administrators can create users or change another user role', async (
   });
   const app = await startApp([admin, technician]);
   try {
+    assert.equal(
+      (await fetch(`${app.baseUrl}/api/admin/sessions`)).status,
+      401,
+    );
     const adminLogin = await login(app.baseUrl, admin.email);
     const { token: adminToken } = await adminLogin.json();
     const technicianLogin = await login(app.baseUrl, technician.email);
@@ -380,9 +475,138 @@ test('only administrators can create users or change another user role', async (
   }
 });
 
+test('only ADMIN can read the real dashboard summary', async () => {
+  const admin = createUser('admin', Role.ADMIN, {
+    password: await PASSWORD_HASH_PROMISE,
+  });
+  const technician = createUser('technician', Role.TECHNICIAN, {
+    password: await PASSWORD_HASH_PROMISE,
+  });
+  const app = await startApp([admin, technician]);
+  try {
+    const adminLogin = await login(app.baseUrl, admin.email);
+    const { token: adminToken } = await adminLogin.json();
+    const technicianLogin = await login(app.baseUrl, technician.email);
+    const { token: technicianToken } = await technicianLogin.json();
+
+    const authorized = await fetch(`${app.baseUrl}/api/admin/dashboard`, {
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    assert.equal(authorized.status, 200);
+    const body = await authorized.json();
+    assert.equal(body.summary.stations, 1);
+    assert.equal(body.summary.users, 2);
+    assert.equal(body.summary.activeUsers, 2);
+
+    const forbidden = await fetch(`${app.baseUrl}/api/admin/dashboard`, {
+      headers: { authorization: `Bearer ${technicianToken}` },
+    });
+    assert.equal(forbidden.status, 403);
+  } finally {
+    await app.close();
+  }
+});
+
 test('issued session tokens are random and stored only as a hash', async () => {
   const user = createUser('admin', Role.ADMIN, {
     password: await PASSWORD_HASH_PROMISE,
+  });
+
+  test('only ADMIN can inspect audit and sessions or revoke a session', async () => {
+    const admin = createUser('admin', Role.ADMIN, {
+      password: await PASSWORD_HASH_PROMISE,
+    });
+
+    test('only ADMIN can update station metadata and invalid inputs are rejected', async () => {
+      const admin = createUser('admin', Role.ADMIN, {
+        password: await PASSWORD_HASH_PROMISE,
+      });
+      const technician = createUser('technician', Role.TECHNICIAN, {
+        password: await PASSWORD_HASH_PROMISE,
+      });
+      const app = await startApp([admin, technician]);
+      try {
+        const adminLogin = await login(app.baseUrl, admin.email);
+        const { token: adminToken } = await adminLogin.json();
+        const technicianLogin = await login(app.baseUrl, technician.email);
+        const { token: technicianToken } = await technicianLogin.json();
+        const adminHeaders = {
+          authorization: `Bearer ${adminToken}`,
+          'content-type': 'application/json',
+        };
+
+        const updated = await fetch(`${app.baseUrl}/api/admin/stations/station-1`, {
+          method: 'PATCH',
+          headers: adminHeaders,
+          body: JSON.stringify({ machineName: 'Taller Norte' }),
+        });
+        assert.equal(updated.status, 200);
+        assert.equal((await updated.json()).station.machineName, 'Taller Norte');
+
+        const invalid = await fetch(`${app.baseUrl}/api/admin/stations/station-1`, {
+          method: 'PATCH',
+          headers: adminHeaders,
+          body: JSON.stringify({ machineName: '' }),
+        });
+        assert.equal(invalid.status, 400);
+
+        const forbidden = await fetch(`${app.baseUrl}/api/admin/stations/station-1`, {
+          method: 'PATCH',
+          headers: {
+            authorization: `Bearer ${technicianToken}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ machineName: 'No autorizado' }),
+        });
+        assert.equal(forbidden.status, 403);
+        assert.equal((await app.store.listAuditEntries())[0]?.action, 'STATION_UPDATED');
+      } finally {
+        await app.close();
+      }
+    });
+    const technician = createUser('technician', Role.TECHNICIAN, {
+      password: await PASSWORD_HASH_PROMISE,
+    });
+    const app = await startApp([admin, technician]);
+    try {
+      const adminLogin = await login(app.baseUrl, admin.email);
+      const { token: adminToken } = await adminLogin.json();
+      const techLogin = await login(app.baseUrl, technician.email);
+      const { token: techToken } = await techLogin.json();
+      const adminHeaders = { authorization: `Bearer ${adminToken}` };
+      const techHeaders = { authorization: `Bearer ${techToken}` };
+
+      const sessions = await fetch(`${app.baseUrl}/api/admin/sessions`, {
+        headers: adminHeaders,
+      });
+      assert.equal(sessions.status, 200);
+      const sessionItems = (await sessions.json()).sessions as AdminSession[];
+      const technicianSession = sessionItems.find((item) => item.user.id === technician.id);
+      assert.ok(technicianSession);
+      assert.equal('tokenHash' in technicianSession, false);
+
+      assert.equal(
+        (await fetch(`${app.baseUrl}/api/admin/audit`, { headers: adminHeaders })).status,
+        200,
+      );
+      assert.equal(
+        (await fetch(`${app.baseUrl}/api/admin/sessions`, { headers: techHeaders })).status,
+        403,
+      );
+
+      const revoked = await fetch(
+        `${app.baseUrl}/api/admin/sessions/${technicianSession.id}`,
+        { method: 'DELETE', headers: adminHeaders },
+      );
+      assert.equal(revoked.status, 204);
+      assert.equal(
+        (await fetch(`${app.baseUrl}/api/auth/me`, { headers: techHeaders })).status,
+        401,
+      );
+      assert.equal((await app.store.listAuditEntries())[0]?.action, 'ADMIN_REVOKED_SESSION');
+    } finally {
+      await app.close();
+    }
   });
   const app = await startApp([user]);
   try {

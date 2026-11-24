@@ -51,6 +51,8 @@ function observation(
     serialNumber,
     state: DeviceState.ANDROID_INIT,
     model: 'SM-S918B',
+    manufacturer: 'samsung',
+    buildNumber: 'TP1A.220624.014',
     androidVersion: '14',
     batteryLevel: 82,
     ...overrides,
@@ -108,6 +110,8 @@ test('new devices are created with missing hardware values as null, not generic 
 
   assert.deepEqual(records.get('ABC123'), {
     model: null,
+    manufacturer: 'samsung',
+    buildNumber: 'TP1A.220624.014',
     androidVersion: null,
     batteryLevel: null,
     state: PrismaDeviceState.ANDROID_INIT,
@@ -140,6 +144,8 @@ test('missing hardware readings preserve the last valid database values', async 
 
   assert.deepEqual(records.get('ABC123'), {
     model: 'SM-S918B',
+    manufacturer: 'samsung',
+    buildNumber: 'TP1A.220624.014',
     androidVersion: '14',
     batteryLevel: 82,
     state: PrismaDeviceState.ANDROID_INIT,
@@ -151,6 +157,8 @@ test('the legacy generic model placeholder is cleared when no valid model is rep
   const { store, records } = createStore();
   records.set('ABC123', {
     model: 'Samsung Device',
+    manufacturer: null,
+    buildNumber: null,
     androidVersion: '14',
     batteryLevel: 82,
     state: PrismaDeviceState.ANDROID_INIT,

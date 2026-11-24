@@ -1,0 +1,2 @@
+ALTER TABLE "Device" ADD COLUMN IF NOT EXISTS "manufacturer" TEXT;
+ALTER TABLE "Device" ADD COLUMN IF NOT EXISTS "buildNumber" TEXT;

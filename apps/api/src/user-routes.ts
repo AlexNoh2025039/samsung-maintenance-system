@@ -21,10 +21,17 @@ export function createUserRouter(store: UserStore): Router {
       response.status(400).json({ error: 'Los datos del usuario no son válidos.' });
       return;
     }
+    if (!request.authUser) {
+      response.status(401).json({ error: 'Autenticación requerida.' });
+      return;
+    }
 
     try {
       const password = await hashPassword(parsed.data.password);
-      const user = await store.createUser({ ...parsed.data, password });
+      const user = await store.createUser(request.authUser.id, {
+        ...parsed.data,
+        password,
+      });
       response.status(201).json({ user });
     } catch (error) {
       if (isUniqueConstraintError(error)) {

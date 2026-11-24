@@ -9,7 +9,7 @@
   "scripts": {
     "build": "pnpm --filter @samsung-maintenance/shared build && tsc",
     "dev": "pnpm --filter @samsung-maintenance/shared build && tsx watch src/index.ts",
-    "test": "pnpm --filter @samsung-maintenance/shared build && tsx --test src/adb.test.ts src/device-monitor.test.ts"
+    "test": "pnpm --filter @samsung-maintenance/shared build && tsx --test src/adb.test.ts src/device-monitor.test.ts src/diagnostic-handler.test.ts src/maintenance-handler.test.ts"
   },
   "dependencies": {
     "@samsung-maintenance/shared": "workspace:*",

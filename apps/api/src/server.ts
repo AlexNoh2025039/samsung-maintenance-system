@@ -12,6 +12,11 @@ import { PrismaAuthStore } from './auth-store';
 import { createRequireAuth, requireRoles } from './auth-middleware';
 import { createAuthRouter } from './auth-routes';
 import { createUserRouter } from './user-routes';
+import { createAdminRouter } from './admin-routes';
+import { createDiagnosticRouter } from './diagnostic-routes';
+import { PrismaDiagnosticStore } from './diagnostic-store';
+import { createMaintenanceRouter, MaintenanceDispatchError } from './maintenance-routes';
+import { PrismaMaintenanceStore } from './maintenance-store';
 
 const envFile = resolve(__dirname, '../.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
@@ -21,6 +26,7 @@ const allowedOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:3000,http:
   .map((origin) => origin.trim())
   .filter(Boolean);
 const sessionTtlHours = Number(process.env.AUTH_SESSION_TTL_HOURS ?? '8');
+const apiHost = process.env.API_HOST?.trim() || '127.0.0.1';
 if (!Number.isInteger(sessionTtlHours) || sessionTtlHours < 1 || sessionTtlHours > 720) {
   throw new Error('AUTH_SESSION_TTL_HOURS must be an integer between 1 and 720.');
 }
@@ -58,8 +64,84 @@ const authStore = new PrismaAuthStore(prisma);
 const requireAuth = createRequireAuth(authStore);
 app.use('/api/auth', createAuthRouter(authStore, requireAuth, sessionTtlHours));
 app.use('/api/users', requireAuth, requireRoles(Role.ADMIN), createUserRouter(authStore));
+app.use('/api/admin', requireAuth, requireRoles(Role.ADMIN), createAdminRouter(authStore));
 
 const inventoryRoles = [Role.ADMIN, Role.SUPERVISOR, Role.TECHNICIAN];
+
+app.use(
+  '/api/devices',
+  requireAuth,
+  requireRoles(...inventoryRoles),
+  createDiagnosticRouter(
+    new PrismaDiagnosticStore(prisma),
+    async (stationId, diagnosticRequest) => {
+      const sockets = await io.in(`station:${stationId}`).fetchSockets();
+      if (sockets.length === 0) {
+        throw new Error('No hay un agente conectado a la estación del dispositivo.');
+      }
+      if (sockets.length > 1) {
+        throw new Error('Hay más de un agente conectado a la estación; se requiere una sola conexión.');
+      }
+      const [ack] = await io
+        .to(sockets[0].id)
+        .timeout(60_000)
+        .emitWithAck('device-diagnostic-request', diagnosticRequest);
+      if (!ack || typeof ack !== 'object' || !('ok' in ack) || ack.ok !== true) {
+        const message =
+          ack && typeof ack === 'object' && 'error' in ack && typeof ack.error === 'string'
+            ? ack.error
+            : 'La estación rechazó la solicitud de diagnóstico.';
+        throw new Error(message);
+      }
+      return 'diagnostic' in ack ? ack.diagnostic : undefined;
+    },
+  ),
+);
+
+app.use(
+  '/api/devices',
+  requireAuth,
+  requireRoles(...inventoryRoles),
+  createMaintenanceRouter(
+    new PrismaMaintenanceStore(prisma),
+    async (stationId, operationRequest) => {
+      const sockets = await io.in(`station:${stationId}`).fetchSockets();
+      if (sockets.length === 0) {
+        throw new MaintenanceDispatchError(
+          'No hay un agente conectado a la estación del dispositivo.',
+          'FAILED',
+        );
+      }
+      if (sockets.length > 1) {
+        throw new MaintenanceDispatchError(
+          'Hay más de un agente conectado a la estación; se requiere una sola conexión.',
+          'FAILED',
+        );
+      }
+
+      let acknowledgements: unknown[];
+      try {
+        acknowledgements = await io
+          .to(sockets[0].id)
+          .timeout(20_000)
+          .emitWithAck('maintenance-operation-request', operationRequest);
+      } catch {
+        throw new MaintenanceDispatchError(
+          'La estación no confirmó si el comando se ejecutó; revisa el dispositivo antes de reintentar.',
+          'UNKNOWN',
+        );
+      }
+      const ack = acknowledgements[0];
+      if (!ack || typeof ack !== 'object' || !('ok' in ack) || ack.ok !== true) {
+        const message =
+          ack && typeof ack === 'object' && 'error' in ack && typeof ack.error === 'string'
+            ? ack.error
+            : 'La estación rechazó la operación.';
+        throw new MaintenanceDispatchError(message, 'FAILED');
+      }
+    },
+  ),
+);
 
 app.get('/api/stations', requireAuth, requireRoles(...inventoryRoles), async (req, res) => {
   try {
@@ -85,6 +167,6 @@ app.get('/api/devices', requireAuth, requireRoles(...inventoryRoles), async (req
   }
 });
 
-httpServer.listen(4000, '127.0.0.1', () => {
-  console.log('API escuchando en http://127.0.0.1:4000');
+httpServer.listen(4000, apiHost, () => {
+  console.log(`API escuchando en http://${apiHost}:4000`);
 });
